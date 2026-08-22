@@ -8,6 +8,7 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   
+  serverExternalPackages: ["firebase-admin"],
   reactCompiler: true,
 };
 
