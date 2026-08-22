@@ -22,7 +22,7 @@ const page = () => {
                         </Link>
                     </Button>
                 </div>
-                <Image src="/robot.png" alt="robo-dude" width={400} height={400} className="max-sm:hidden">
+                <Image src="/robot_2.png" alt="robo-dude" width={400} height={400} className="max-sm:hidden">
                 </Image>
             </section>
 
