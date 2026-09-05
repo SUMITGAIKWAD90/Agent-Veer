@@ -1,38 +1,82 @@
 "use server";
-import { db, auth } from "@/firebase/admin";
+
 import { cookies } from "next/headers";
-import { success } from "zod/v4";
 
-const ONE_WEEK = 60 * 60 * 24 * 7;
+import { auth, db } from "@/firebase/admin";
 
-export async function signUp(params: SignUpParams) {
+const SESSION_COOKIE_NAME = "session";
+const SESSION_DURATION = 60 * 60 * 24 * 7; // 7 days
+
+type AuthResult =
+  | {
+      success: true;
+      message: string;
+    }
+  | {
+      success: false;
+      message: string;
+    };
+
+export async function setSessionCookie(
+  idToken: string
+): Promise<void> {
+  if (!idToken) {
+    throw new Error("ID token is required.");
+  }
+
+  const cookieStore = await cookies();
+
+  const sessionCookie = await auth.createSessionCookie(idToken, {
+    expiresIn: SESSION_DURATION * 1000,
+  });
+
+  cookieStore.set(SESSION_COOKIE_NAME, sessionCookie, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: SESSION_DURATION,
+  });
+}
+
+export async function signUp(
+  params: SignUpParams
+): Promise<AuthResult> {
   const { uid, name, email } = params;
 
   try {
-    const userRecord = await db.collection("users").doc(uid).get();
-
-    if (userRecord.exists) {
+    if (!uid || !email || !name) {
       return {
         success: false,
-        message: "User already exists. Please sign in instead.",
+        message: "Name, email, and user ID are required.",
       };
     }
 
-    await db.collection("users").doc(uid).set({
-      name, email
-    })
+    const userRef = db.collection("users").doc(uid);
+    const userSnapshot = await userRef.get();
 
-    return{
-      success:true,
-      message: 'Account created successfully. Please sign in.'
+    if (userSnapshot.exists) {
+      return {
+        success: false,
+        message: "User already exists. Please sign in.",
+      };
     }
 
+    await userRef.set({
+      name,
+      email,
+      createdAt: new Date().toISOString(),
+    });
+
+    return {
+      success: true,
+      message: "Account created successfully. Please sign in.",
+    };
   } catch (error: unknown) {
-    console.error("Error creating a user", error);
+    console.error("Error creating user:", error);
 
     if (
-      typeof error === "object" &&
-      error !== null &&
+      error instanceof Error &&
       "code" in error &&
       error.code === "auth/email-already-exists"
     ) {
@@ -44,117 +88,95 @@ export async function signUp(params: SignUpParams) {
 
     return {
       success: false,
-      message: "Failed to crate an account",
+      message: "Failed to create account. Please try again.",
     };
   }
 }
 
-export async function signIn(params:SignInParams) {
-  const {email, idToken } = params;
 
-  try{
-    const userRecord = await auth.getUserByEmail(email);
+export async function signIn(
+  params: SignInParams
+): Promise<AuthResult> {
+  const { idToken } = params;
 
-    if(!userRecord){
-      return{
+  try {
+    if (!idToken) {
+      return {
         success: false,
-        message: 'User does not exist. Create an account instead.'
-      }
+        message: "Authentication token is required.",
+      };
     }
+
+    // Verify the ID token before creating a session.
+    const decodedToken = await auth.verifyIdToken(idToken);
+
+    // Make sure the Firebase Auth user still exists.
+    await auth.getUser(decodedToken.uid);
 
     await setSessionCookie(idToken);
 
-  }catch (e){
-    console.log(e);
+    return {
+      success: true,
+      message: "Signed in successfully.",
+    };
+  } catch (error: unknown) {
+    console.error("Error signing in:", error);
 
-    return{
+    return {
       success: false,
-      message: 'Failed to login into an account.'
-    }
+      message: "Failed to log into account. Please try again.",
+    };
   }
-  
 }
 
-export async function setSessionCookie(idToken: string){ 
+
+export async function signOut(): Promise<void> {
   const cookieStore = await cookies();
 
-  const sessionCokkie = await auth.createSessionCookie(idToken, {
-    expiresIn: ONE_WEEK * 1000,
-  })
-
-  cookieStore.set('session', sessionCokkie,{
-    maxAge: ONE_WEEK,
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax'
-  })
+  cookieStore.delete(SESSION_COOKIE_NAME);
 }
+
 
 export async function getCurrentUser(): Promise<User | null> {
-  const cookieStore = await cookies();
+  try {
+    const cookieStore = await cookies();
 
-  const sessionCookie = cookieStore.get('session')?.value;
+    const sessionCookie = cookieStore.get(
+      SESSION_COOKIE_NAME
+    )?.value;
 
-  if(!sessionCookie) return null;
+    if (!sessionCookie) {
+      return null;
+    }
 
-  try{
-    const decodedClaims = await auth.verifySessionCookie(sessionCookie, true);
-    
-    const userRecord = await db.
-      collection('users')
+    // Verify session and revoke-check the Firebase session.
+    const decodedClaims = await auth.verifySessionCookie(
+      sessionCookie,
+      true
+    );
+
+    const userSnapshot = await db
+      .collection("users")
       .doc(decodedClaims.uid)
       .get();
 
-    if(!userRecord.exists) return null;
+    if (!userSnapshot.exists) {
+      return null;
+    }
 
-    return{
-      ...userRecord.data(),
-      id: userRecord.id,
+    return {
+      id: userSnapshot.id,
+      ...userSnapshot.data(),
     } as User;
-
-  }catch (e){
-    console.log(e)
+  } catch (error: unknown) {
+    console.error("Error getting current user:", error);
 
     return null;
   }
 }
 
-export async function isAuthenticated() {
+export async function isAuthenticated(): Promise<boolean> {
   const user = await getCurrentUser();
 
-  return !!user; 
-}
-
-export async function getInterviewsByUserId(userId: string): Promise<Interview[] | null> {
-  const interviews = await db
-      .collection('interviews')
-      .where('userId', '==', userId)
-      .orderBy('createdAt', 'desc')
-      .get();
-
-
-  return interviews.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data()
-  })) as Interview[];
-
-}
-
-export async function getLatestInterviews(params: GetLatestInterviewsParams): Promise<Interview[] | null> {
-  const {userId, limit = 20 } = params;
-
-  const interviews = await db
-      .collection('interviews')
-      .orderBy('createdAt', 'desc')
-      .where('finalized', '==', true)
-      .where('userId', '!=', userId)
-      .limit(limit) 
-      .get();
-
-
-  return interviews.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data()
-  })) as Interview[];
-
+  return user !== null;
 }

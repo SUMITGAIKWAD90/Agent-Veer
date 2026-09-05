@@ -30,3 +30,6 @@ yarn-error.log*
 
 *.tsbuildinfo
 next-env.d.ts
+
+vapi_agent_config.txt
+GPT_HELP.txt
